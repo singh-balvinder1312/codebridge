@@ -1,4 +1,7 @@
+
 package com.codebridge.backend.github;
+
+import com.codebridge.backend.exception.InvalidGitHubRepositoryUrlException;
 
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -7,7 +10,9 @@ import java.util.regex.Pattern;
 public class GitHubUrlParser {
 
     private static final Pattern OWNER_PATTERN =
-            Pattern.compile("[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})");
+            Pattern.compile(
+                    "[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})"
+            );
 
     private static final Pattern REPOSITORY_PATTERN =
             Pattern.compile("[A-Za-z0-9_.-]+");
@@ -15,7 +20,7 @@ public class GitHubUrlParser {
     public GitHubRepository parse(String url) {
 
         if (url == null || url.isBlank()) {
-            throw new IllegalArgumentException(
+            throw new InvalidGitHubRepositoryUrlException(
                     "GitHub repository URL is required"
             );
         }
@@ -30,27 +35,29 @@ public class GitHubUrlParser {
                     || uri.getQuery() != null
                     || uri.getFragment() != null) {
 
-                throw new IllegalArgumentException(
-                        "Only HTTPS GitHub repository URLs are supported"
+                throw new InvalidGitHubRepositoryUrlException(
+                        "Only HTTPS GitHub repository URLs "
+                                + "are supported"
                 );
             }
 
             String path = uri.getPath();
 
             if (path == null) {
-                throw new IllegalArgumentException(
+                throw new InvalidGitHubRepositoryUrlException(
                         "Invalid GitHub repository path"
                 );
             }
 
             String[] parts = path.split("/", -1);
 
-            if (parts.length < 3 || parts.length > 4
+            if (parts.length < 3
+                    || parts.length > 4
                     || !parts[0].isEmpty()
                     || (parts.length == 4
                     && !parts[3].isEmpty())) {
 
-                throw new IllegalArgumentException(
+                throw new InvalidGitHubRepositoryUrlException(
                         "Expected https://github.com/owner/repository"
                 );
             }
@@ -65,15 +72,19 @@ public class GitHubUrlParser {
                     || repository.equals(".")
                     || repository.equals("..")) {
 
-                throw new IllegalArgumentException(
+                throw new InvalidGitHubRepositoryUrlException(
                         "Invalid GitHub owner or repository name"
                 );
             }
 
-            return new GitHubRepository(owner, repository);
+            return new GitHubRepository(
+                    owner,
+                    repository
+            );
 
         } catch (URISyntaxException exception) {
-            throw new IllegalArgumentException(
+
+            throw new InvalidGitHubRepositoryUrlException(
                     "Invalid GitHub repository URL",
                     exception
             );

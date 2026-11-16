@@ -1,93 +1,182 @@
+
 package com.codebridge.backend.exception;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
 
-import java.util.Map;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ProblemDetail;
+import org.springframework.http.ResponseEntity;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class GlobalExceptionHandlerTest {
+class GitHubApiExceptionHandlerTest {
 
-    private final GlobalExceptionHandler handler =
-            new GlobalExceptionHandler();
+    private GitHubApiExceptionHandler handler;
 
-    @Test
-    void shouldReturn404WhenRepositoryNotFound() {
-
-        GitHubApiException exception = new GitHubApiException(
-                GitHubApiException.Reason.NOT_FOUND,
-                "Repository not found"
-        );
-
-        ResponseEntity<Map<String, Object>> response =
-                handler.handleGitHubApiException(exception);
-
-        assertEquals(HttpStatus.NOT_FOUND, response.getStatusCode());
-        assertNotNull(response.getBody());
-        assertEquals(404, response.getBody().get("status"));
-        assertEquals(
-                "GitHub repository not found or not publicly accessible",
-                response.getBody().get("message")
-        );
+    @BeforeEach
+    void setUp() {
+        handler = new GitHubApiExceptionHandler();
     }
 
     @Test
-    void shouldReturn503WhenRateLimited() {
+    void shouldReturn400ForInvalidGitHubUrl() {
 
-        GitHubApiException exception = new GitHubApiException(
-                GitHubApiException.Reason.RATE_LIMITED,
-                "Rate limit reached"
-        );
+        InvalidGitHubRepositoryUrlException exception =
+                new InvalidGitHubRepositoryUrlException(
+                        "Sensitive submitted URL"
+                );
 
-        ResponseEntity<Map<String, Object>> response =
-                handler.handleGitHubApiException(exception);
+        ResponseEntity<ProblemDetail> response =
+                handler.handleInvalidGitHubUrl(exception);
 
         assertEquals(
-                HttpStatus.SERVICE_UNAVAILABLE,
+                HttpStatus.BAD_REQUEST,
                 response.getStatusCode()
         );
+
         assertNotNull(response.getBody());
-        assertEquals(503, response.getBody().get("status"));
+
+        assertEquals(
+                "INVALID_GITHUB_URL",
+                response.getBody()
+                        .getProperties()
+                        .get("errorCode")
+        );
+
+        assertFalse(
+                response.getBody()
+                        .getDetail()
+                        .contains("Sensitive submitted URL")
+        );
     }
 
     @Test
-    void shouldReturn502ForUpstreamError() {
+    void shouldReturn404WhenGitHubResourceIsMissing() {
 
-        GitHubApiException exception = new GitHubApiException(
-                GitHubApiException.Reason.UPSTREAM_ERROR,
-                "GitHub connection failed"
+        GitHubApiException exception =
+                new GitHubApiException(
+                        GitHubApiException.Reason.NOT_FOUND,
+                        "Sensitive upstream details"
+                );
+
+        ResponseEntity<ProblemDetail> response =
+                handler.handleGitHubApiException(exception);
+
+        assertEquals(
+                HttpStatus.NOT_FOUND,
+                response.getStatusCode()
         );
 
-        ResponseEntity<Map<String, Object>> response =
+        assertNotNull(response.getBody());
+
+        assertEquals(
+                "NOT_FOUND",
+                response.getBody()
+                        .getProperties()
+                        .get("errorCode")
+        );
+
+        assertFalse(
+                response.getBody()
+                        .getDetail()
+                        .contains("Sensitive upstream details")
+        );
+    }
+
+    @Test
+    void shouldReturn429WhenGitHubRateLimitIsExceeded() {
+
+        GitHubApiException exception =
+                new GitHubApiException(
+                        GitHubApiException.Reason.RATE_LIMITED,
+                        "Rate limit details"
+                );
+
+        ResponseEntity<ProblemDetail> response =
+                handler.handleGitHubApiException(exception);
+
+        assertEquals(
+                HttpStatus.TOO_MANY_REQUESTS,
+                response.getStatusCode()
+        );
+
+        assertNotNull(response.getBody());
+
+        assertEquals(
+                "RATE_LIMITED",
+                response.getBody()
+                        .getProperties()
+                        .get("errorCode")
+        );
+    }
+
+    @Test
+    void shouldReturn502ForGitHubFailures() {
+
+        GitHubApiException exception =
+                new GitHubApiException(
+                        GitHubApiException.Reason.UPSTREAM_ERROR,
+                        "Private upstream response body"
+                );
+
+        ResponseEntity<ProblemDetail> response =
                 handler.handleGitHubApiException(exception);
 
         assertEquals(
                 HttpStatus.BAD_GATEWAY,
                 response.getStatusCode()
         );
+
         assertNotNull(response.getBody());
-        assertEquals(502, response.getBody().get("status"));
+
+        assertEquals(
+                "UPSTREAM_ERROR",
+                response.getBody()
+                        .getProperties()
+                        .get("errorCode")
+        );
+
+        assertFalse(
+                response.getBody()
+                        .getDetail()
+                        .contains("Private upstream response body")
+        );
     }
 
     @Test
-    void shouldNotExposeInternalExceptionMessages() {
+    void shouldNotExposeCredentialsInResponses() {
 
-        GitHubApiException exception = new GitHubApiException(
-                GitHubApiException.Reason.UPSTREAM_ERROR,
-                "Sensitive internal connection information"
-        );
+        String secret = "example-sensitive-token";
 
-        ResponseEntity<Map<String, Object>> response =
+        GitHubApiException exception =
+                new GitHubApiException(
+                        GitHubApiException.Reason.UPSTREAM_ERROR,
+                        "Authorization: Bearer " + secret
+                );
+
+        ResponseEntity<ProblemDetail> response =
                 handler.handleGitHubApiException(exception);
 
         assertNotNull(response.getBody());
 
-        String responseText = response.getBody().toString();
+        assertFalse(
+                response.getBody()
+                        .getTitle()
+                        .contains(secret)
+        );
 
-        assertFalse(responseText.contains(
-                "Sensitive internal connection information"
-        ));
+        assertFalse(
+                response.getBody()
+                        .getDetail()
+                        .contains(secret)
+        );
+
+        assertFalse(
+                response.getBody()
+                        .getProperties()
+                        .toString()
+                        .contains(secret)
+        );
     }
 }

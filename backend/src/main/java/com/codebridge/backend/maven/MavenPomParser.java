@@ -1,3 +1,4 @@
+
 package com.codebridge.backend.maven;
 
 import org.springframework.stereotype.Service;
@@ -12,6 +13,7 @@ import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
+
 import java.io.IOException;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
@@ -26,9 +28,21 @@ import java.util.regex.Pattern;
 public class MavenPomParser {
 
     private static final int MAX_XML_BYTES = 512 * 1024;
+
     private static final Pattern PROPERTY_PATTERN =
             Pattern.compile("\\$\\{([^}]+)}");
+
     private static final int MAX_PROPERTY_RESOLUTION_PASSES = 10;
+
+    // Maven dependencyManagement identifies dependencies
+    // using groupId, artifactId, type, and classifier.
+    private record DependencyKey(
+            String groupId,
+            String artifactId,
+            String type,
+            String classifier
+    ) {
+    }
 
     public List<MavenDependency> parseDependencies(String xml) {
 
@@ -86,18 +100,29 @@ public class MavenPomParser {
                 );
             }
 
-            Map<String, String> properties = collectProperties(root);
+            Map<String, String> properties =
+                    collectProperties(root);
 
-            Element dependenciesElement = directChild(root, "dependencies");
+            Map<DependencyKey, String> managedVersions =
+                    collectManagedVersions(root, properties);
+
+            // Only return dependencies declared directly
+            // under the root project's dependencies section.
+            Element dependenciesElement =
+                    directChild(root, "dependencies");
 
             if (dependenciesElement == null) {
                 return List.of();
             }
 
-            List<MavenDependency> dependencies = new ArrayList<>();
-            NodeList children = dependenciesElement.getChildNodes();
+            List<MavenDependency> dependencies =
+                    new ArrayList<>();
+
+            NodeList children =
+                    dependenciesElement.getChildNodes();
 
             for (int i = 0; i < children.getLength(); i++) {
+
                 Node node = children.item(i);
 
                 if (!(node instanceof Element element)
@@ -125,29 +150,62 @@ public class MavenPomParser {
                         properties
                 );
 
+                String type = resolveProperties(
+                        childText(element, "type"),
+                        properties
+                );
+
+                String classifier = resolveProperties(
+                        childText(element, "classifier"),
+                        properties
+                );
+
                 if (groupId == null || artifactId == null) {
                     throw new IllegalArgumentException(
                             "Maven dependency is missing groupId or artifactId"
                     );
                 }
 
+                // Explicit versions take precedence.
+                // Otherwise, resolve from this POM's
+                // dependencyManagement section.
+                if (version == null) {
+
+                    DependencyKey key = dependencyKey(
+                            groupId,
+                            artifactId,
+                            type,
+                            classifier
+                    );
+
+                    if (key != null) {
+                        version = managedVersions.get(key);
+                    }
+                }
+
+                // Preserve the dependency's artifact type
+                // and classifier in the returned model.
                 dependencies.add(new MavenDependency(
                         groupId,
                         artifactId,
                         version,
-                        scope == null ? "compile" : scope
+                        scope,
+                        type,
+                        classifier
                 ));
             }
 
             return List.copyOf(dependencies);
 
         } catch (ParserConfigurationException exception) {
+
             throw new IllegalStateException(
                     "Secure XML parser configuration failed",
                     exception
             );
 
         } catch (SAXException | IOException exception) {
+
             throw new IllegalArgumentException(
                     "Invalid or unsafe Maven pom.xml",
                     exception
@@ -155,34 +213,192 @@ public class MavenPomParser {
         }
     }
 
-    private Map<String, String> collectProperties(Element root) {
-        Map<String, String> properties = new HashMap<>();
+    private Map<DependencyKey, String> collectManagedVersions(
+            Element root,
+            Map<String, String> properties) {
 
-        String projectGroupId = childText(root, "groupId");
-        String projectArtifactId = childText(root, "artifactId");
-        String projectVersion = childText(root, "version");
+        Map<DependencyKey, String> managedVersions =
+                new HashMap<>();
+
+        Element managementElement =
+                directChild(root, "dependencyManagement");
+
+        if (managementElement == null) {
+            return managedVersions;
+        }
+
+        Element managedDependencies =
+                directChild(managementElement, "dependencies");
+
+        if (managedDependencies == null) {
+            return managedVersions;
+        }
+
+        NodeList children =
+                managedDependencies.getChildNodes();
+
+        for (int i = 0; i < children.getLength(); i++) {
+
+            Node node = children.item(i);
+
+            if (!(node instanceof Element element)
+                    || !"dependency".equals(element.getLocalName())) {
+                continue;
+            }
+
+            String groupId = resolveProperties(
+                    childText(element, "groupId"),
+                    properties
+            );
+
+            String artifactId = resolveProperties(
+                    childText(element, "artifactId"),
+                    properties
+            );
+
+            String version = resolveProperties(
+                    childText(element, "version"),
+                    properties
+            );
+
+            String type = resolveProperties(
+                    childText(element, "type"),
+                    properties
+            );
+
+            String classifier = resolveProperties(
+                    childText(element, "classifier"),
+                    properties
+            );
+
+            String scope = resolveProperties(
+                    childText(element, "scope"),
+                    properties
+            );
+
+            // Imported BOMs require separate Maven
+            // model resolution and are not expanded here.
+            if ("pom".equals(type) && "import".equals(scope)) {
+                continue;
+            }
+
+            if (groupId == null
+                    || artifactId == null
+                    || version == null) {
+                continue;
+            }
+
+            // Avoid treating unresolved Maven properties
+            // as known dependency versions.
+            if (containsUnresolvedProperty(version)) {
+                continue;
+            }
+
+            DependencyKey key = dependencyKey(
+                    groupId,
+                    artifactId,
+                    type,
+                    classifier
+            );
+
+            if (key != null) {
+                managedVersions.put(key, version);
+            }
+        }
+
+        return managedVersions;
+    }
+
+    private DependencyKey dependencyKey(
+            String groupId,
+            String artifactId,
+            String type,
+            String classifier) {
+
+        if (groupId == null || artifactId == null) {
+            return null;
+        }
+
+        String effectiveType =
+                type == null || type.isBlank()
+                        ? "jar"
+                        : type;
+
+        String effectiveClassifier =
+                classifier == null || classifier.isBlank()
+                        ? ""
+                        : classifier;
+
+        if (containsUnresolvedProperty(groupId)
+                || containsUnresolvedProperty(artifactId)
+                || containsUnresolvedProperty(effectiveType)
+                || containsUnresolvedProperty(effectiveClassifier)) {
+            return null;
+        }
+
+        return new DependencyKey(
+                groupId,
+                artifactId,
+                effectiveType,
+                effectiveClassifier
+        );
+    }
+
+    private boolean containsUnresolvedProperty(
+            String value) {
+
+        return value != null
+                && PROPERTY_PATTERN.matcher(value).find();
+    }
+
+    private Map<String, String> collectProperties(
+            Element root) {
+
+        Map<String, String> properties =
+                new HashMap<>();
+
+        String projectGroupId =
+                childText(root, "groupId");
+
+        String projectArtifactId =
+                childText(root, "artifactId");
+
+        String projectVersion =
+                childText(root, "version");
 
         if (projectGroupId != null) {
-            properties.put("project.groupId", projectGroupId);
+            properties.put(
+                    "project.groupId",
+                    projectGroupId
+            );
         }
 
         if (projectArtifactId != null) {
-            properties.put("project.artifactId", projectArtifactId);
+            properties.put(
+                    "project.artifactId",
+                    projectArtifactId
+            );
         }
 
         if (projectVersion != null) {
-            properties.put("project.version", projectVersion);
+            properties.put(
+                    "project.version",
+                    projectVersion
+            );
         }
 
-        Element propertiesElement = directChild(root, "properties");
+        Element propertiesElement =
+                directChild(root, "properties");
 
         if (propertiesElement == null) {
             return properties;
         }
 
-        NodeList children = propertiesElement.getChildNodes();
+        NodeList children =
+                propertiesElement.getChildNodes();
 
         for (int i = 0; i < children.getLength(); i++) {
+
             Node node = children.item(i);
 
             if (!(node instanceof Element element)) {
@@ -216,25 +432,44 @@ public class MavenPomParser {
 
         String resolved = value;
 
-        for (int pass = 0; pass < MAX_PROPERTY_RESOLUTION_PASSES; pass++) {
-            Matcher matcher = PROPERTY_PATTERN.matcher(resolved);
-            StringBuffer buffer = new StringBuffer();
+        for (int pass = 0;
+             pass < MAX_PROPERTY_RESOLUTION_PASSES;
+             pass++) {
+
+            Matcher matcher =
+                    PROPERTY_PATTERN.matcher(resolved);
+
+            StringBuffer buffer =
+                    new StringBuffer();
+
             boolean changed = false;
 
             while (matcher.find()) {
-                String propertyName = matcher.group(1);
-                String replacement = properties.get(propertyName);
+
+                String propertyName =
+                        matcher.group(1);
+
+                String replacement =
+                        properties.get(propertyName);
 
                 if (replacement == null) {
+
                     matcher.appendReplacement(
                             buffer,
-                            Matcher.quoteReplacement(matcher.group(0))
+                            Matcher.quoteReplacement(
+                                    matcher.group(0)
+                            )
                     );
+
                 } else {
+
                     matcher.appendReplacement(
                             buffer,
-                            Matcher.quoteReplacement(replacement)
+                            Matcher.quoteReplacement(
+                                    replacement
+                            )
                     );
+
                     changed = true;
                 }
             }
@@ -251,10 +486,15 @@ public class MavenPomParser {
         return resolved;
     }
 
-    private Element directChild(Element parent, String name) {
-        NodeList children = parent.getChildNodes();
+    private Element directChild(
+            Element parent,
+            String name) {
+
+        NodeList children =
+                parent.getChildNodes();
 
         for (int i = 0; i < children.getLength(); i++) {
+
             Node node = children.item(i);
 
             if (node instanceof Element element
@@ -266,14 +506,19 @@ public class MavenPomParser {
         return null;
     }
 
-    private String childText(Element parent, String name) {
-        Element child = directChild(parent, name);
+    private String childText(
+            Element parent,
+            String name) {
+
+        Element child =
+                directChild(parent, name);
 
         if (child == null) {
             return null;
         }
 
-        String value = child.getTextContent().trim();
+        String value =
+                child.getTextContent().trim();
 
         return value.isEmpty() ? null : value;
     }
